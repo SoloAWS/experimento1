@@ -10,11 +10,11 @@ from typing import List
 
 app = FastAPI()
 
-redis_host = os.getenv("REDIS_HOST", "your-elasticache-endpoint")
+redis_host = os.getenv("REDIS_HOST", "reportes-cluster.zrnzc3.ng.0001.use1.cache.amazonaws.com")
 redis_port = os.getenv("REDIS_PORT", 6379)
 redis_client = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
 
-DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://data-service-url/incidents")
+DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://3.86.197.100:8000/incidents")
 
 class DateRange(BaseModel):
     fecha_inicio: datetime
@@ -46,6 +46,7 @@ async def get_incidents(fecha_inicio: datetime, fecha_fin: datetime) -> List[Inc
             "fecha_fin": fecha_fin.isoformat()
         })
         response.raise_for_status()
+        print(response)
         return [Incident(**incident) for incident in response.json()]
 
 def calculate_kpis(incidents: List[Incident], fecha_inicio: datetime, fecha_fin: datetime) -> KPIReport:
