@@ -42,7 +42,7 @@ async def get_kpis(uuid: UUID):
         raise HTTPException(status_code=400, detail="UUID inválido")
     except Exception as e:
         print(e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail="Reporte no encontrado")
 
 if __name__ == "__main__":
     import uvicorn
