@@ -7,14 +7,24 @@ import json
 import os
 import httpx
 from typing import List
+import asyncio
+from redis.exceptions import RedisError
 
 app = FastAPI()
 
 redis_host = os.getenv("REDIS_HOST", "reportes-cluster.zrnzc3.ng.0001.use1.cache.amazonaws.com")
-redis_port = os.getenv("REDIS_PORT", 6379)
-redis_client = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+redis_port = int(os.getenv("REDIS_PORT", 6379))
+redis_client = redis.Redis(
+    host=redis_host,
+    port=redis_port,
+    decode_responses=True,
+    socket_timeout=1.5,
+    socket_connect_timeout=1.5,
+    health_check_interval=30
+)
 
-DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://3.86.197.100:8000/incidents")
+DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://172.31.56.137:8000/incidents")
+HTTP_TIMEOUT = 2.0
 
 class DateRange(BaseModel):
     fecha_inicio: datetime
@@ -37,17 +47,31 @@ class KPIReport(BaseModel):
 
 @app.get("/healthcheck")
 async def healthcheck():
-    return {"status": "OK"}
+    try:
+        if redis_client.ping():
+            return {"status": "OK", "redis": "Connected"}
+        else:
+            return {"status": "Degraded", "redis": "Not responding"}
+    except RedisError:
+        return {"status": "Degraded", "redis": "Connection Error"}
 
 async def get_incidents(fecha_inicio: datetime, fecha_fin: datetime) -> List[Incident]:
     async with httpx.AsyncClient() as client:
-        response = await client.get(DATA_SERVICE_URL, params={
-            "fecha_inicio": fecha_inicio.isoformat(),
-            "fecha_fin": fecha_fin.isoformat()
-        })
-        response.raise_for_status()
-        print(response)
-        return [Incident(**incident) for incident in response.json()]
+        try:
+            response = await client.get(
+                DATA_SERVICE_URL,
+                params={
+                    "fecha_inicio": fecha_inicio.isoformat(),
+                    "fecha_fin": fecha_fin.isoformat()
+                },
+                timeout=HTTP_TIMEOUT
+            )
+            response.raise_for_status()
+            return [Incident(**incident) for incident in response.json()]
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Timeout al obtener datos del servicio")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Error al obtener datos del servicio: {str(e)}")
 
 def calculate_kpis(incidents: List[Incident], fecha_inicio: datetime, fecha_fin: datetime) -> KPIReport:
     total_incidentes = len(incidents)
@@ -65,6 +89,17 @@ def calculate_kpis(incidents: List[Incident], fecha_inicio: datetime, fecha_fin:
         fecha_fin=fecha_fin
     )
 
+async def save_to_redis(key: str, value: str):
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(redis_client.set, key, value),
+            timeout=1.5
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Timeout al guardar en Redis")
+    except RedisError:
+        raise HTTPException(status_code=503, detail="Error de conexión a Redis")
+
 @app.post("/kpis")
 async def generate_kpi_report(date_range: DateRange):
     try:
@@ -77,13 +112,14 @@ async def generate_kpi_report(date_range: DateRange):
         kpi_dict['fecha_inicio'] = kpi_dict['fecha_inicio'].isoformat()
         kpi_dict['fecha_fin'] = kpi_dict['fecha_fin'].isoformat()
         
-        redis_client.set(kpi_report.uuid, json.dumps(kpi_dict))
+        await save_to_redis(kpi_report.uuid, json.dumps(kpi_dict))
         
         return {"message": "Reporte generado y guardado exitosamente", "data": kpi_dict}
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Error al obtener datos del servicio: {str(e)}")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error inesperado: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 if __name__ == "__main__":
     import uvicorn
